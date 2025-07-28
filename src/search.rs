@@ -14,12 +14,12 @@ pub async fn search(query: String) -> Result<Vec<Station>, Box<dyn Error>> {
         .order(StationOrder::Clickcount)
         .send()
         .await?;
-    return Ok(stations
+    Ok(stations
         .iter()
         .take(10)
         .map(|station| Station {
             name: station.name.to_string(),
             url: station.url_resolved.to_string(),
         })
-        .collect());
+        .collect())
 }

@@ -1,6 +1,8 @@
 // TODO
 // Show dialog when a stream fails
 //
+// Integrate with system volume controls and mpris
+//
 // ensure only one radio-browser search is running at a time, maybe keep the api
 // around or set up another task that is fired whenever the search changes to
 // check if the last search has finished and if store the new search (and overwrite it) until it does finish
@@ -38,10 +40,7 @@ struct SearchItem {
 
 impl SearchItem {
     fn new(station: Station, sender: AsyncComponentSender<Radio>) -> Self {
-        Self {
-            station: station.clone(),
-            sender,
-        }
+        Self { station, sender }
     }
 }
 

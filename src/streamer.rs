@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::Error;
-use gstreamer::glib::{self, MainLoop};
 use gstreamer_player::{Player, gst::prelude::*};
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +20,7 @@ fn load(uri: &str, token: CancellationToken) -> Result<Player, Error> {
     // Tell the player what uri to play.
     player.set_uri(Some(uri));
 
-    let error = Arc::new(Mutex::new(Ok((player.clone()))));
+    let error = Arc::new(Mutex::new(Ok(player.clone())));
     let token_clone = token.clone();
     // Connect to the player's "end-of-stream" signal, which will tell us when the
     // currently played media stream reached its end.
@@ -31,7 +30,6 @@ fn load(uri: &str, token: CancellationToken) -> Result<Player, Error> {
     });
 
     let error_clone = Arc::clone(&error);
-    let token_clone = token.clone();
     // Connect to the player's "error" signal, which will inform us about eventual
     // errors (such as failing to retrieve a http stream).
     player.connect_error(move |player, err| {
@@ -40,16 +38,16 @@ fn load(uri: &str, token: CancellationToken) -> Result<Player, Error> {
         *error.lock().unwrap() = Err(err.clone());
 
         player.stop();
-        token_clone.cancel();
+        token.cancel();
     });
 
     let guard = error.as_ref().lock().unwrap();
 
-    return guard.clone().map_err(|e| e.into());
+    guard.clone().map_err(|e| e.into())
 }
 
 pub fn play(uri: &str, volume: Arc<RwLock<f64>>, token: CancellationToken) {
-    if let Ok(player) = load(&uri, token.clone()) {
+    if let Ok(player) = load(uri, token.clone()) {
         let player_clone = player.clone();
         thread::spawn(move || {
             loop {
