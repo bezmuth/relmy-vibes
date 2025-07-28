@@ -1,14 +1,10 @@
-use std::{
-    sync::{Arc, Mutex, RwLock},
-    thread,
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Error;
 use gstreamer_player::{Player, gst::prelude::*};
-use tokio_util::sync::CancellationToken;
+use relm4::AsyncComponentSender;
 
-pub fn load() -> Result<Player, Error> {
+pub fn load(sender: AsyncComponentSender<crate::Radio>) -> Result<Player, Error> {
     gstreamer::init()?;
 
     let dispatcher = gstreamer_player::PlayerGMainContextSignalDispatcher::new(None);
@@ -17,9 +13,7 @@ pub fn load() -> Result<Player, Error> {
         Some(dispatcher.upcast::<gstreamer_player::PlayerSignalDispatcher>()),
     );
 
-    // Tell the player what uri to play.
-    //player.set_uri(Some(uri));
-
+    player.set_volume(1.0);
     let error = Arc::new(Mutex::new(Ok(player.clone())));
     // Connect to the player's "end-of-stream" signal, which will tell us when the
     // currently played media stream reached its end.
@@ -38,24 +32,11 @@ pub fn load() -> Result<Player, Error> {
         player.stop();
     });
 
+    player.connect_volume_changed(move |player| {
+        sender.input(crate::Msg::VolumeChanged(player.volume()))
+    });
+
     let guard = error.as_ref().lock().unwrap();
 
     guard.clone().map_err(|e| e.into())
 }
-
-// pub fn play(uri: &str, volume: Arc<RwLock<f64>>, token: CancellationToken) {
-//     if let Ok(player) = load(uri, token.clone()) {
-//         let player_clone = player.clone();
-//         thread::spawn(move || {
-//             loop {
-//                 player_clone.set_volume(*volume.read().unwrap());
-//                 if token.is_cancelled() {
-//                     player_clone.stop();
-//                     break;
-//                 }
-//                 std::thread::sleep(Duration::from_millis(100));
-//             }
-//         });
-//         player.play();
-//     }
-//}

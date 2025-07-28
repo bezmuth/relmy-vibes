@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.98"
 gstreamer = "0.24.0"
+gstreamer-audio = "0.24.0"
 gstreamer-player = "0.24.0"
 radiobrowser = "0.6.1"
 relm4 = {version = "0.9.1", features = ["libadwaita"]}

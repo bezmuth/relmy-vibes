@@ -7,6 +7,7 @@
 // around or set up another task that is fired whenever the search changes to
 // check if the last search has finished and if store the new search (and overwrite it) until it does finish
 
+use gstreamer_audio::{StreamVolume, StreamVolumeFormat::*};
 use gstreamer_player::Player;
 use gtk::prelude::*;
 use relm4::{
@@ -271,12 +272,14 @@ struct Radio {
     menu_id: usize,
     playing_id: Option<usize>,
     player: Player,
+    volume: f64,
 }
 
 #[derive(Debug)]
 enum Msg {
     Play(Station, usize),
     Stop,
+    ChangeVolume(f64),
     VolumeChanged(f64),
     StationNameChanged(String),
     StationUrlChanged(String),
@@ -322,10 +325,11 @@ impl AsyncComponent for Radio {
                         gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.1){
                             set_width_request: 120,
                             connect_change_value[sender] => move |_, _, val| {
-                                sender.input(Msg::VolumeChanged(val));
+                                sender.input(Msg::ChangeVolume(val));
                                 Propagation::Proceed
                             },
-                            set_value: 1.0,
+                            #[watch]
+                            set_value: model.volume,
                         },
                     },
 
@@ -454,7 +458,8 @@ impl AsyncComponent for Radio {
             hover_id: None,
             menu_id: 0,
             playing_id: None,
-            player: streamer::load().unwrap(),
+            player: streamer::load(sender.clone()).unwrap(),
+            volume: 1.0,
         };
 
         let station_list_view = &model.station_list.list_view_wrapper.view;
@@ -493,7 +498,14 @@ impl AsyncComponent for Radio {
                 self.title = "RelmyVibes".to_string();
                 self.player.stop();
             }
-            Msg::VolumeChanged(val) => self.player.set_volume(val),
+            // We do these conversions so the volume behaviour matches what the
+            // user expects (pavucontrol)
+            Msg::ChangeVolume(val) => self
+                .player
+                .set_volume(StreamVolume::convert_volume(Cubic, Linear, val)),
+            Msg::VolumeChanged(val) => {
+                self.volume = StreamVolume::convert_volume(Linear, Cubic, val)
+            }
             Msg::StationNameChanged(name) => self.new_station_name = name,
             Msg::StationUrlChanged(url) => self.new_station_url = url,
             Msg::AddStation => {
