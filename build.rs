@@ -11,6 +11,15 @@ fn main() {
         // Directory with custom icons (if any)
         None::<&str>,
         // List of icons to include
-        ["stop-large", "speaker-3", "plus", "search-global"],
+        [
+            "stop-large",
+            "speaker-0",
+            "speaker-1",
+            "speaker-2",
+            "speaker-3",
+            "plus",
+            "search-global",
+            "loupe",
+        ],
     );
 }

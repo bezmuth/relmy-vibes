@@ -1,19 +1,23 @@
 // TODO
 // Show dialog when a stream fails
 //
-// Integrate with system volume controls and mpris
+// mpris
 //
-// ensure only one radio-browser search is running at a time, maybe keep the api
-// around or set up another task that is fired whenever the search changes to
-// check if the last search has finished and if store the new search (and overwrite it) until it does finish
+// Figure out some way to speed up searches
 
 use gstreamer_audio::{StreamVolume, StreamVolumeFormat::*};
 use gstreamer_player::Player;
 use gtk::prelude::*;
+use radiobrowser::RadioBrowserAPI;
 use relm4::{
     RelmObjectExt,
     binding::StringBinding,
-    gtk::{PolicyType, gdk::Rectangle, glib::Propagation, pango},
+    gtk::{
+        PolicyType,
+        gdk::Rectangle,
+        glib::Propagation,
+        pango,
+    },
     prelude::*,
     typed_view::{
         TypedListItem,
@@ -55,7 +59,6 @@ impl RelmListItem for SearchItem {
         relm4::view! {
             my_box = gtk::Box {
                 set_spacing: 2,
-                set_margin_all: 2,
                 set_orientation: gtk::Orientation::Horizontal,
                 set_hexpand: false,
                 #[name = "label"]
@@ -273,6 +276,11 @@ struct Radio {
     playing_id: Option<usize>,
     player: Player,
     volume: f64,
+    radio_browser_api: RadioBrowserAPI,
+    query: String,
+    volume_icon: String,
+    muted_volume: f64,
+    muted: bool,
 }
 
 #[derive(Debug)]
@@ -287,7 +295,9 @@ enum Msg {
     ShowMenu(f64, f64),
     DeleteStation,
     SetHoverId(Option<usize>),
-    SearchQuery(String),
+    SearchQueryChanged(String),
+    Search,
+    ToggleMute,
 }
 
 #[relm4::component(async)]
@@ -301,7 +311,6 @@ impl AsyncComponent for Radio {
         gtk::Window {
             #[watch]
             set_title: Some(&model.title),
-            set_default_size: (200, 250),
             gtk::Box {
                 set_orientation: gtk::Orientation::Vertical,
                 set_spacing: 5,
@@ -312,15 +321,20 @@ impl AsyncComponent for Radio {
                 gtk::CenterBox {
                     #[wrap(Some)]
                     set_start_widget = &gtk::Box {
-                        set_spacing: 5,
+                        set_spacing: 2,
                         set_orientation: gtk::Orientation::Horizontal,
                         // Stop button
                         gtk::Button {
+                            set_has_frame: false,
                             set_icon_name: icon_names::STOP_LARGE,
                             connect_clicked => Msg::Stop,
                         },
-                        gtk::Image {
-                            set_icon_name: Some(icon_names::SPEAKER_3),
+                        // mute button
+                        gtk::Button {
+                            set_has_frame: false,
+                            #[watch]
+                            set_icon_name: &model.volume_icon,
+                            connect_clicked => Msg::ToggleMute,
                         },
                         gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.1){
                             set_width_request: 120,
@@ -343,19 +357,32 @@ impl AsyncComponent for Radio {
                             set_direction: gtk::ArrowType::Down,
                             #[wrap(Some)]
                             set_popover: search_popover = &gtk::Popover{
-                                set_position: gtk::PositionType::Right,
                                 gtk::Box {
                                     set_orientation: gtk::Orientation::Vertical,
-                                    gtk::SearchEntry {
-                                        connect_search_changed[sender] => move |entry| {
-                                            let query = entry.text();
-                                            sender.input(Msg::SearchQuery(query.into()));
-                                        }
+                                    gtk::Box {
+                                        set_spacing: 2,
+                                        set_margin_bottom: 5,
+                                        set_margin_end: 2,
+                                        set_margin_start: 2,
+                                        set_orientation: gtk::Orientation::Horizontal,
+                                        gtk::SearchEntry {
+                                            set_hexpand: true,
+                                            connect_changed[sender] => move |entry| {
+                                                let query = entry.text();
+                                                sender.input(Msg::SearchQueryChanged(query.into()));
+                                            },
+                                            connect_activate[sender] => move |_| {
+                                                sender.input(Msg::Search)
+                                            }
+                                        },
+                                        gtk::Button {
+                                            set_icon_name: icon_names::LOUPE,
+                                            connect_clicked => Msg::Search,
+                                        },
                                     },
 
                                     gtk::ScrolledWindow {
                                         set_height_request: 200,
-                                        set_width_request: 300,
                                         set_hscrollbar_policy: PolicyType::Never,
                                         #[local_ref]
                                         search_results -> gtk::ListView {
@@ -460,6 +487,11 @@ impl AsyncComponent for Radio {
             playing_id: None,
             player: streamer::load(sender.clone()).unwrap(),
             volume: 1.0,
+            radio_browser_api: RadioBrowserAPI::new().await.unwrap(),
+            query: String::new(),
+            volume_icon: icon_names::SPEAKER_3.to_string(),
+            muted_volume: 1.0,
+            muted: false,
         };
 
         let station_list_view = &model.station_list.list_view_wrapper.view;
@@ -475,7 +507,7 @@ impl AsyncComponent for Radio {
         &mut self,
         msg: Self::Input,
         sender: AsyncComponentSender<Self>,
-        _root: &Self::Root,
+        root: &Self::Root,
     ) {
         match msg {
             Msg::Play(station, id) => {
@@ -504,7 +536,16 @@ impl AsyncComponent for Radio {
                 .player
                 .set_volume(StreamVolume::convert_volume(Cubic, Linear, val)),
             Msg::VolumeChanged(val) => {
-                self.volume = StreamVolume::convert_volume(Linear, Cubic, val)
+                self.volume = StreamVolume::convert_volume(Linear, Cubic, val);
+                if self.volume == 0.0 {
+                    self.volume_icon = icon_names::SPEAKER_0.to_string();
+                } else if self.volume <= 0.33 {
+                    self.volume_icon = icon_names::SPEAKER_1.to_string();
+                } else if self.volume <= 0.66 {
+                    self.volume_icon = icon_names::SPEAKER_2.to_string();
+                } else {
+                    self.volume_icon = icon_names::SPEAKER_3.to_string();
+                }
             }
             Msg::StationNameChanged(name) => self.new_station_name = name,
             Msg::StationUrlChanged(url) => self.new_station_url = url,
@@ -533,13 +574,31 @@ impl AsyncComponent for Radio {
             Msg::SetHoverId(id) => {
                 self.hover_id = id;
             }
-            Msg::SearchQuery(query) => {
+            Msg::SearchQueryChanged(query) => self.query = query,
+            Msg::Search => {
                 self.search_results_handle.clear();
-                let results = search::search(query).await.unwrap();
-                for result in results {
-                    self.search_results_handle
-                        .append(SearchItem::new(result, sender.clone()));
+                root.set_cursor_from_name(Some("wait"));
+                let _: Vec<_> = search::search(self.radio_browser_api.clone(), self.query.clone())
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|item| {
+                        self.search_results_handle
+                            .append(SearchItem::new(item.clone(), sender.clone()))
+                    })
+                    .collect();
+                root.set_cursor_from_name(Some("default"));
+            }
+            Msg::ToggleMute => {
+                if self.muted {
+                    self.volume = self.muted_volume;
+                    self.muted = false;
+                } else {
+                    self.muted_volume = self.volume;
+                    self.volume = 0.0;
+                    self.muted = true;
                 }
+                sender.input(Msg::ChangeVolume(self.volume))
             }
         }
     }

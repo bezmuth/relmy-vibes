@@ -3,9 +3,7 @@ use radiobrowser::StationOrder;
 use std::error::Error;
 
 use crate::Station;
-
-pub async fn search(query: String) -> Result<Vec<Station>, Box<dyn Error>> {
-    let api = RadioBrowserAPI::new().await?;
+pub async fn search(api: RadioBrowserAPI, query: String) -> Result<Vec<Station>, Box<dyn Error>> {
     let stations = api
         .get_stations()
         .name(query)
@@ -16,7 +14,6 @@ pub async fn search(query: String) -> Result<Vec<Station>, Box<dyn Error>> {
         .await?;
     Ok(stations
         .iter()
-        .take(10)
         .map(|station| Station {
             name: station.name.to_string(),
             url: station.url_resolved.to_string(),
