@@ -7,8 +7,7 @@
 // around or set up another task that is fired whenever the search changes to
 // check if the last search has finished and if store the new search (and overwrite it) until it does finish
 
-use std::sync::Arc;
-
+use gstreamer_player::Player;
 use gtk::prelude::*;
 use relm4::{
     RelmObjectExt,
@@ -21,8 +20,6 @@ use relm4::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 
 mod icon_names {
     include!(concat!(env!("OUT_DIR"), "/icon_names.rs"));
@@ -268,13 +265,12 @@ struct Radio {
     ctx_menu_handle: gtk::Popover,
     search_results_handle: TypedListView<SearchItem, gtk::NoSelection>,
     title: String,
-    token: CancellationToken,
-    volume: Arc<RwLock<f64>>,
     new_station_name: String,
     new_station_url: String,
     hover_id: Option<usize>,
     menu_id: usize,
     playing_id: Option<usize>,
+    player: Player,
 }
 
 #[derive(Debug)]
@@ -453,13 +449,12 @@ impl AsyncComponent for Radio {
             ctx_menu_handle,
             search_results_handle,
             title: "RelmyVibes".to_string(),
-            token: CancellationToken::new(),
-            volume: Arc::new(RwLock::new(1.0)),
             new_station_name: String::new(),
             new_station_url: String::new(),
             hover_id: None,
             menu_id: 0,
             playing_id: None,
+            player: streamer::load().unwrap(),
         };
 
         let station_list_view = &model.station_list.list_view_wrapper.view;
@@ -482,15 +477,13 @@ impl AsyncComponent for Radio {
                 if let Some(station_item) = self.station_list.get_by_id(self.playing_id) {
                     station_item.borrow_mut().inactive();
                 }
-                self.token.cancel();
-                self.token = CancellationToken::new();
-                let (volume, token) = (self.volume.clone(), self.token.clone());
                 if let Some(station_item) = self.station_list.get_by_id(self.hover_id) {
                     station_item.borrow_mut().active();
                 }
                 self.playing_id = Some(id);
                 self.title = station.name.clone();
-                sender.oneshot_command(async move { streamer::play(&station.url, volume, token) });
+                self.player.set_uri(Some(&station.url));
+                self.player.play();
             }
             Msg::Stop => {
                 if let Some(station_item) = self.station_list.get_by_id(self.playing_id) {
@@ -498,9 +491,9 @@ impl AsyncComponent for Radio {
                 }
                 self.playing_id = None;
                 self.title = "RelmyVibes".to_string();
-                self.token.cancel();
+                self.player.stop();
             }
-            Msg::VolumeChanged(val) => *self.volume.write().unwrap() = val,
+            Msg::VolumeChanged(val) => self.player.set_volume(val),
             Msg::StationNameChanged(name) => self.new_station_name = name,
             Msg::StationUrlChanged(url) => self.new_station_url = url,
             Msg::AddStation => {
