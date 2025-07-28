@@ -1,306 +1,548 @@
-// TODO:
-// Favicon rendering!
-// Error dialog when a stream fails (lets actually use that result)
-// Station browser from radio-browser?
-use iced::{
-    Alignment::Center,
-    Element, Font, Length, Size, Subscription, Task, Theme,
-    widget::{
-        button, column, container, horizontal_space, mouse_area, row, scrollable, slider, text,
-        text_input, vertical_space,
+// TODO
+// Show dialog when a stream fails
+//
+// ensure only one radio-browser search is running at a time, maybe keep the api
+// around or set up another task that is fired whenever the search changes to
+// check if the last search has finished and if store the new search (and overwrite it) until it does finish
+
+use std::sync::Arc;
+
+use gtk::prelude::*;
+use relm4::{
+    RelmObjectExt,
+    binding::StringBinding,
+    gtk::{PolicyType, gdk::Rectangle, glib::Propagation, pango},
+    prelude::*,
+    typed_view::{
+        TypedListItem,
+        list::{RelmListItem, TypedListView},
     },
-    window,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+mod icon_names {
+    include!(concat!(env!("OUT_DIR"), "/icon_names.rs"));
+}
+
 mod saver;
+mod search;
 mod streamer;
+
+#[derive(Debug)]
+struct SearchItem {
+    station: Station,
+    sender: AsyncComponentSender<Radio>,
+}
+
+impl SearchItem {
+    fn new(station: Station, sender: AsyncComponentSender<Radio>) -> Self {
+        Self {
+            station: station.clone(),
+            sender,
+        }
+    }
+}
+
+struct SearchWidgets {
+    label: gtk::Label,
+    add_button: gtk::Button,
+}
+
+impl RelmListItem for SearchItem {
+    type Root = gtk::Box;
+    type Widgets = SearchWidgets;
+
+    fn setup(_item: &gtk::ListItem) -> (gtk::Box, SearchWidgets) {
+        relm4::view! {
+            my_box = gtk::Box {
+                set_spacing: 2,
+                set_margin_all: 2,
+                set_orientation: gtk::Orientation::Horizontal,
+                set_hexpand: false,
+                #[name = "label"]
+                gtk::Label {
+                    set_wrap: true,
+                    set_ellipsize: pango::EllipsizeMode::End,
+                },
+                #[name = "add_button"]
+                gtk::Button {
+                    set_halign: gtk::Align::End,
+                    set_hexpand: true,
+                },
+            },
+        }
+
+        let widgets = SearchWidgets { label, add_button };
+
+        (my_box, widgets)
+    }
+
+    fn bind(&mut self, widgets: &mut Self::Widgets, _root: &mut Self::Root) {
+        let SearchWidgets { label, add_button } = widgets;
+
+        let sender = self.sender.clone();
+        let station = self.station.clone();
+        label.set_text(&self.station.name);
+
+        add_button.set_icon_name(icon_names::PLUS);
+        add_button.connect_clicked(move |_| {
+            sender.input(Msg::StationNameChanged(station.name.clone()));
+            sender.input(Msg::StationUrlChanged(station.url.clone()));
+            sender.input(Msg::AddStation);
+        });
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Error {
     Error,
 }
 
-fn main() -> iced::Result {
-    iced::daemon("IcyVibes", Radio::update, Radio::view)
-        .subscription(Radio::subscription)
-        .theme(|_, _| Theme::Dark)
-        .font(include_bytes!("../fonts/icons.ttf").as_slice())
-        .run_with(Radio::new)
+#[derive(Debug)]
+struct StationListItem {
+    station: Station,
+    id: usize,
+    sender: AsyncComponentSender<Radio>,
+    active: bool,
+    labelbinding: StringBinding,
+}
+
+impl StationListItem {
+    fn new(station: Station, id: usize, sender: AsyncComponentSender<Radio>) -> Self {
+        Self {
+            station: station.clone(),
+            id,
+            sender,
+            active: false,
+            labelbinding: StringBinding::new(station.name),
+        }
+    }
+    pub fn active(&mut self) {
+        self.active = true;
+        self.labelbinding
+            .set_value(format!("<b>{}</b>", self.station.name));
+    }
+    pub fn inactive(&mut self) {
+        self.active = false;
+        self.labelbinding.set_value(self.station.name.clone());
+    }
+}
+
+struct StationWidgets {
+    label: gtk::Label,
+}
+
+impl RelmListItem for StationListItem {
+    type Root = gtk::Box;
+    type Widgets = StationWidgets;
+
+    fn setup(_item: &gtk::ListItem) -> (gtk::Box, StationWidgets) {
+        relm4::view! {
+            my_box = gtk::Box {
+                #[name = "label"]
+                gtk::Label,
+            },
+        }
+
+        let widgets = StationWidgets { label };
+
+        (my_box, widgets)
+    }
+
+    fn bind(&mut self, widgets: &mut Self::Widgets, root: &mut Self::Root) {
+        let StationWidgets { label } = widgets;
+
+        let motion = gtk::EventControllerMotion::new();
+
+        let sender = self.sender.clone();
+        let id = self.id;
+        // When pointer enters or moves inside
+        motion.connect_enter(move |_, _, _| {
+            sender.input(Msg::SetHoverId(Some(id)));
+        });
+        let sender = self.sender.clone();
+        // When pointer leaves the row widget
+        motion.connect_leave(move |_| {
+            sender.input(Msg::SetHoverId(None));
+        });
+
+        let click = gtk::GestureClick::new();
+        click.set_button(0);
+        let sender = self.sender.clone();
+        let station = self.station.clone();
+        click.connect_pressed(move |controller, _, _, _| {
+            if controller.current_button() == gtk::gdk::BUTTON_PRIMARY {
+                sender.input(Msg::Play(station.clone(), id));
+            }
+        });
+
+        root.add_controller(motion);
+        root.add_controller(click);
+
+        if self.active {
+            self.active() // ensure we dont loose boldness when rebinding
+        }
+
+        label.set_use_markup(true);
+        label.add_binding(&self.labelbinding, "label");
+    }
+}
+
+#[derive(Debug)]
+struct StationList {
+    list_view_wrapper: TypedListView<StationListItem, gtk::NoSelection>,
+    sender: AsyncComponentSender<Radio>,
+}
+
+impl StationList {
+    fn new(sender: AsyncComponentSender<Radio>) -> Self {
+        Self {
+            list_view_wrapper: TypedListView::new(),
+            sender,
+        }
+    }
+
+    fn append(&mut self, station: Station) {
+        let id = self.list_view_wrapper.len();
+        self.list_view_wrapper.append(StationListItem::new(
+            station,
+            id as usize,
+            self.sender.clone(),
+        ));
+        self.save();
+    }
+
+    fn get_by_id(&self, id: Option<usize>) -> Option<TypedListItem<StationListItem>> {
+        if let Some(id_target) = id {
+            for x in 0..self.list_view_wrapper.len() {
+                if let Some(indexed_item) = self.list_view_wrapper.get(x)
+                    && indexed_item.borrow().id == id_target
+                {
+                    return Some(indexed_item);
+                }
+            }
+        }
+        None
+    }
+
+    fn remove_by_id(&mut self, id: usize) {
+        for x in 0..self.list_view_wrapper.len() {
+            if let Some(item) = self.list_view_wrapper.get(x)
+                && item.borrow().id == id
+            {
+                self.list_view_wrapper.remove(x);
+            }
+        }
+        self.save();
+    }
+
+    fn save(&self) {
+        let mut stations = vec![];
+        for x in 0..self.list_view_wrapper.len() {
+            if let Some(item) = self.list_view_wrapper.get(x) {
+                stations.push(item.borrow().station.clone());
+            }
+        }
+        saver::save_stations(stations).unwrap();
+    }
+
+    fn load(&mut self) {
+        let stations = saver::load_stations();
+        let _: Vec<_> = stations
+            .iter()
+            .map(|station| self.append(station.clone()))
+            .collect();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Station {
+pub struct Station {
     name: String,
     url: String, // https://www.radio-browser.info/
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Radio {
-    stations: Vec<Station>,
-    volume: Arc<RwLock<f32>>,
+    station_list: StationList,
+    ctx_menu_handle: gtk::Popover,
+    search_results_handle: TypedListView<SearchItem, gtk::NoSelection>,
+    title: String,
     token: CancellationToken,
-    main_window: window::Id,
-    dialog_window: Option<window::Id>,
+    volume: Arc<RwLock<f64>>,
     new_station_name: String,
     new_station_url: String,
-    editing: bool,
+    hover_id: Option<usize>,
+    menu_id: usize,
+    playing_id: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
-enum Message {
-    Play(String),
+#[derive(Debug)]
+enum Msg {
+    Play(Station, usize),
     Stop,
-    Stopped(Result<(), Error>),
-    VolumeChanged(f32),
-    AddStationDialog,
-    WindowOpened(window::Id),
-    WindowClosed(window::Id),
+    VolumeChanged(f64),
     StationNameChanged(String),
     StationUrlChanged(String),
-    AddNewStation,
-    DeleteStation(usize),
-    ToggleEdit,
+    AddStation,
+    ShowMenu(f64, f64),
+    DeleteStation,
+    SetHoverId(Option<usize>),
+    SearchQuery(String),
 }
 
-impl Radio {
-    fn new() -> (Self, Task<Message>) {
-        let (first_id, open) = window::open(window::Settings {
-            size: Size::new(430.0, 400.0),
-            position: window::Position::Centered,
-            ..window::Settings::default()
-        });
-        (
-            Self {
-                stations: saver::load_stations(),
-                volume: Arc::new(RwLock::new(1.0)),
-                token: CancellationToken::new(),
-                main_window: first_id,
-                new_station_name: String::new(),
-                new_station_url: String::new(),
-                dialog_window: None,
-                editing: false,
-            },
-            open.map(Message::WindowOpened),
-        )
+#[relm4::component(async)]
+impl AsyncComponent for Radio {
+    type Init = ();
+    type Input = Msg;
+    type Output = ();
+    type CommandOutput = ();
+
+    view! {
+        gtk::Window {
+            #[watch]
+            set_title: Some(&model.title),
+            set_default_size: (200, 250),
+            gtk::Box {
+                set_orientation: gtk::Orientation::Vertical,
+                set_spacing: 5,
+                set_margin_all: 5,
+
+                // using a center box so I can maybe have something in the
+                // middle in the future
+                gtk::CenterBox {
+                    #[wrap(Some)]
+                    set_start_widget = &gtk::Box {
+                        set_spacing: 5,
+                        set_orientation: gtk::Orientation::Horizontal,
+                        // Stop button
+                        gtk::Button {
+                            set_icon_name: icon_names::STOP_LARGE,
+                            connect_clicked => Msg::Stop,
+                        },
+                        gtk::Image {
+                            set_icon_name: Some(icon_names::SPEAKER_3),
+                        },
+                        gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.1){
+                            set_width_request: 120,
+                            connect_change_value[sender] => move |_, _, val| {
+                                sender.input(Msg::VolumeChanged(val));
+                                Propagation::Proceed
+                            },
+                            set_value: 1.0,
+                        },
+                    },
+
+                    #[wrap(Some)]
+                    set_end_widget = &gtk::Box{
+                        set_halign: gtk::Align::End,
+                        set_spacing: 5,
+                        // Search button
+                        gtk::MenuButton {
+                            set_icon_name: icon_names::SEARCH_GLOBAL,
+                            set_direction: gtk::ArrowType::Down,
+                            #[wrap(Some)]
+                            set_popover: search_popover = &gtk::Popover{
+                                set_position: gtk::PositionType::Right,
+                                gtk::Box {
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    gtk::SearchEntry {
+                                        connect_search_changed[sender] => move |entry| {
+                                            let query = entry.text();
+                                            sender.input(Msg::SearchQuery(query.into()));
+                                        }
+                                    },
+
+                                    gtk::ScrolledWindow {
+                                        set_height_request: 200,
+                                        set_width_request: 300,
+                                        set_hscrollbar_policy: PolicyType::Never,
+                                        #[local_ref]
+                                        search_results -> gtk::ListView {
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        // Add button
+                        gtk::MenuButton {
+                            set_icon_name: icon_names::PLUS,
+                            set_direction: gtk::ArrowType::Down,
+                            #[wrap(Some)]
+                            set_popover: popover = &gtk::Popover {
+                                set_position: gtk::PositionType::Right,
+
+                                gtk::Box {
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    set_spacing: 5,
+                                    gtk::Label {
+                                        set_halign: gtk::Align::Start,
+                                        set_label: "Name:",
+                                    },
+                                    gtk::Entry {
+                                        connect_changed[sender] => move |entry| {
+                                            let buffer = entry.buffer();
+                                            sender.input(Msg::StationNameChanged(buffer.text().into()));
+                                        }
+                                    },
+                                    gtk::Label {
+                                        set_halign: gtk::Align::Start,
+                                        set_label: "URL:",
+                                    },
+                                    gtk::Entry {
+                                        connect_changed[sender] => move |entry| {
+                                            let buffer = entry.buffer();
+                                            sender.input(Msg::StationUrlChanged(buffer.text().into()));
+                                        }
+                                    },
+                                    gtk::Separator {},
+                                    gtk::Button {
+                                        set_label: "Add Station",
+                                        connect_clicked => Msg::AddStation,
+                                    },
+
+                                },
+                            },
+                        },
+                    },
+                },
+
+                #[local_ref]
+                // right click menu
+                ctx_menu -> gtk::Popover {
+                    gtk::Button {
+                        set_label: "Delete Station",
+                        connect_clicked => Msg::DeleteStation,
+                    },
+                },
+
+                // station list
+                gtk::ScrolledWindow {
+                    set_vexpand: true,
+
+                    #[local_ref]
+                    station_list_view -> gtk::ListView {
+                        add_controller = gtk::GestureClick {
+                            set_button: 0,
+                            connect_pressed[sender] => move |controller, _, x, y| {
+                                if controller.current_button() == gtk::gdk::BUTTON_SECONDARY {
+                                    sender.input(Msg::ShowMenu(x, y));
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
     }
 
-    fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::Play(url) => {
+    async fn init(
+        _: Self::Init,
+        root: Self::Root,
+        sender: AsyncComponentSender<Self>,
+    ) -> AsyncComponentParts<Self> {
+        // Initialize the StationList
+        let mut station_list = StationList::new(sender.clone());
+        station_list.load();
+
+        let ctx_menu_handle = gtk::Popover::new();
+        let search_results_handle = TypedListView::new();
+
+        let model = Self {
+            station_list,
+            ctx_menu_handle,
+            search_results_handle,
+            title: "RelmyVibes".to_string(),
+            token: CancellationToken::new(),
+            volume: Arc::new(RwLock::new(1.0)),
+            new_station_name: String::new(),
+            new_station_url: String::new(),
+            hover_id: None,
+            menu_id: 0,
+            playing_id: None,
+        };
+
+        let station_list_view = &model.station_list.list_view_wrapper.view;
+        let ctx_menu = &model.ctx_menu_handle;
+        let search_results = &model.search_results_handle.view;
+
+        let widgets = view_output!();
+
+        AsyncComponentParts { model, widgets }
+    }
+
+    async fn update(
+        &mut self,
+        msg: Self::Input,
+        sender: AsyncComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
+        match msg {
+            Msg::Play(station, id) => {
+                if let Some(station_item) = self.station_list.get_by_id(self.playing_id) {
+                    station_item.borrow_mut().inactive();
+                }
                 self.token.cancel();
                 self.token = CancellationToken::new();
-                Task::perform(
-                    streamer::play(url, self.volume.clone(), self.token.clone()),
-                    Message::Stopped,
-                )
+                let (volume, token) = (self.volume.clone(), self.token.clone());
+                if let Some(station_item) = self.station_list.get_by_id(self.hover_id) {
+                    station_item.borrow_mut().active();
+                }
+                self.playing_id = Some(id);
+                self.title = station.name.clone();
+                sender.oneshot_command(async move { streamer::play(&station.url, volume, token) });
             }
-            Message::Stopped(_result) => Task::none(),
-            Message::Stop => {
+            Msg::Stop => {
+                if let Some(station_item) = self.station_list.get_by_id(self.playing_id) {
+                    station_item.borrow_mut().inactive();
+                }
+                self.playing_id = None;
+                self.title = "RelmyVibes".to_string();
                 self.token.cancel();
-                Task::none()
             }
-            Message::VolumeChanged(new_vol) => {
-                *self.volume.write().unwrap() = new_vol / 100.0;
-                Task::none()
-            }
-            Message::AddStationDialog => {
-                if self.dialog_window.is_none() {
-                    let (id, open) = window::open(window::Settings {
-                        size: Size::new(400.0, 170.0),
-                        resizable: false,
-                        position: window::Position::Centered,
-                        ..window::Settings::default()
-                    });
-                    self.dialog_window = Some(id);
-                    open.map(Message::WindowOpened)
-                } else {
-                    Task::none()
-                }
-            }
-            Message::WindowClosed(id) => {
-                if id == self.main_window {
-                    self.token.cancel();
-                    iced::exit()
-                } else {
-                    self.new_station_name = String::new();
-                    self.new_station_url = String::new();
-                    self.dialog_window = None;
-                    Task::none()
-                }
-            }
-            Message::WindowOpened(_id) => Task::none(),
-            Message::StationNameChanged(name) => {
-                self.new_station_name = name;
-                Task::none()
-            }
-            Message::StationUrlChanged(url) => {
-                self.new_station_url = url;
-                Task::none()
-            }
-            Message::AddNewStation => {
-                if self.new_station_name.is_empty() | self.new_station_url.is_empty() {
-                    Task::none()
-                } else {
-                    self.stations.push(Station {
+            Msg::VolumeChanged(val) => *self.volume.write().unwrap() = val,
+            Msg::StationNameChanged(name) => self.new_station_name = name,
+            Msg::StationUrlChanged(url) => self.new_station_url = url,
+            Msg::AddStation => {
+                if !self.new_station_name.is_empty() && !self.new_station_url.is_empty() {
+                    let new_station = Station {
                         name: self.new_station_name.clone(),
                         url: self.new_station_url.clone(),
-                    });
-                    let window_close = window::close(self.dialog_window.unwrap()); // we know that if this is fired the window exists so an unwrap is fine
-                    self.dialog_window = None;
-                    saver::save_stations(self.stations.clone()).unwrap();
-                    window_close
+                    };
+                    self.station_list.append(new_station);
                 }
             }
-            Message::DeleteStation(index) => {
-                self.stations.remove(index);
-                saver::save_stations(self.stations.clone()).unwrap();
-                Task::none()
+            Msg::ShowMenu(x, y) => {
+                if let Some(hover_id) = self.hover_id {
+                    let rect = Rectangle::new(x as i32, (y as i32) + 45, 0, 0);
+                    self.ctx_menu_handle.set_pointing_to(Some(&rect));
+                    self.ctx_menu_handle.popup();
+                    self.menu_id = hover_id;
+                }
             }
-            Message::ToggleEdit => {
-                self.editing = !self.editing;
-                Task::none()
+            Msg::DeleteStation => {
+                self.ctx_menu_handle.popdown();
+                self.station_list.remove_by_id(self.menu_id);
+                self.ctx_menu_handle.popdown();
             }
-        }
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        window::close_events().map(Message::WindowClosed)
-    }
-
-    fn view(&self, window_id: window::Id) -> Element<Message> {
-        if window_id == self.main_window {
-            // the radio playing interface
-            let radio_interface = column![
-                station_list_element(self.stations.clone(), self.editing),
-                global_controls(self.volume.clone(), self.editing)
-            ];
-
-            radio_interface.into()
-        } else if let Some(dialog_id) = self.dialog_window
-            && dialog_id == window_id
-        {
-            // Station adding interface
-            column![
-                text("Station Name:"),
-                text_input("", &self.new_station_name).on_input(Message::StationNameChanged),
-                text("Station Url:"),
-                text_input("", &self.new_station_url).on_input(Message::StationUrlChanged),
-                vertical_space(),
-                button("Add").on_press(Message::AddNewStation),
-            ]
-            .spacing(5)
-            .padding(5)
-            .into()
-        } else {
-            horizontal_space().into()
+            Msg::SetHoverId(id) => {
+                self.hover_id = id;
+            }
+            Msg::SearchQuery(query) => {
+                self.search_results_handle.clear();
+                let results = search::search(query).await.unwrap();
+                for result in results {
+                    self.search_results_handle
+                        .append(SearchItem::new(result, sender.clone()));
+                }
+            }
         }
     }
 }
 
-fn global_controls<'a>(volume: Arc<RwLock<f32>>, editing: bool) -> Element<'a, Message> {
-    let global_controls = container(
-        row![
-            button(stop_icon()).on_press(Message::Stop),
-            row![
-                volume_icon(),
-                slider(
-                    0.0..=100.0,
-                    *volume.read().unwrap() * 100.0,
-                    Message::VolumeChanged
-                )
-            ]
-            .spacing(5)
-            .align_y(Center)
-            .width(150.0),
-            horizontal_space(),
-            if editing {
-                row![
-                    button(add_icon()).on_press(Message::AddStationDialog),
-                    button(done_icon()).on_press(Message::ToggleEdit),
-                ]
-                .spacing(5)
-            } else {
-                row![button(edit_icon()).on_press(Message::ToggleEdit)]
-            }
-        ]
-        .align_y(Center)
-        .spacing(5),
-    )
-    .style(container::rounded_box)
-    .width(iced::Length::Fill)
-    .padding(10);
-
-    global_controls.into()
-}
-
-fn station_list_element<'a>(stations: Vec<Station>, editing: bool) -> Element<'a, Message> {
-    if stations.is_empty() {
-        container(
-            row![
-                text("Please add a station: "),
-                button(add_icon()).on_press(Message::AddStationDialog)
-            ]
-            .spacing(5)
-            .align_y(Center),
-        )
-        .center(Length::Fill)
-        .into()
-    } else {
-        let station_list = column(
-            stations
-                .into_iter()
-                .enumerate()
-                .map(|(index, station)| station_element(index, station, editing)),
-        )
-        .padding(5)
-        .spacing(5);
-
-        let station_scrollable = scrollable(station_list);
-        column![station_scrollable, vertical_space()].into()
-    }
-}
-
-fn station_element<'a>(index: usize, station: Station, editing: bool) -> Element<'a, Message> {
-    let mut row_elements = row![text(station.name), horizontal_space()].align_y(Center);
-    if editing {
-        row_elements = row_elements.push(
-            button(delete_icon())
-                .style(button::danger)
-                .on_press(Message::DeleteStation(index)),
-        );
-    }
-    mouse_area(
-        container(row_elements)
-            .padding(10)
-            .style(container::rounded_box),
-    )
-    .interaction(iced::mouse::Interaction::Pointer)
-    .on_press(Message::Play(station.url))
-    .into()
-}
-
-fn stop_icon<'a, Message>() -> Element<'a, Message> {
-    icon('\u{E800}')
-}
-fn edit_icon<'a, Message>() -> Element<'a, Message> {
-    icon('\u{E802}')
-}
-fn done_icon<'a, Message>() -> Element<'a, Message> {
-    icon('\u{E804}')
-}
-fn delete_icon<'a, Message>() -> Element<'a, Message> {
-    icon('\u{E801}')
-}
-fn add_icon<'a, Message>() -> Element<'a, Message> {
-    icon('\u{E803}')
-}
-fn volume_icon<'a, Message>() -> Element<'a, Message> {
-    icon('\u{E805}')
-}
-fn icon<'a, Message>(codepoint: char) -> Element<'a, Message> {
-    const ICON_FONT: Font = Font::with_name("icons");
-    text(codepoint).font(ICON_FONT).into()
+fn main() {
+    relm4_icons::initialize_icons(icon_names::GRESOURCE_BYTES, icon_names::RESOURCE_PREFIX);
+    let app = RelmApp::new("relm4.example.typed-list-view");
+    app.run_async::<Radio>(());
 }

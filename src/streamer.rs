@@ -1,63 +1,66 @@
-use std::num::NonZeroUsize;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex, RwLock},
+    thread,
+    time::Duration,
+};
 
-use stream_download::http::HttpStream;
-use stream_download::http::reqwest::Client;
-use stream_download::source::{DecodeError, SourceStream};
-use stream_download::storage::bounded::BoundedStorageProvider;
-use stream_download::storage::memory::MemoryStorageProvider;
-use stream_download::{Settings, StreamDownload};
+use anyhow::Error;
+use gstreamer::glib::{self, MainLoop};
+use gstreamer_player::{Player, gst::prelude::*};
 use tokio_util::sync::CancellationToken;
 
-use crate::Error;
+fn load(uri: &str, token: CancellationToken) -> Result<Player, Error> {
+    gstreamer::init()?;
 
-pub async fn play(
-    url: String,
-    volume: Arc<RwLock<f32>>,
-    token: CancellationToken,
-) -> Result<(), Error> {
-    let stream = HttpStream::<Client>::create(url.parse().unwrap())
-        .await
-        .unwrap();
+    let dispatcher = gstreamer_player::PlayerGMainContextSignalDispatcher::new(None);
+    let player = gstreamer_player::Player::new(
+        None::<gstreamer_player::PlayerVideoRenderer>,
+        Some(dispatcher.upcast::<gstreamer_player::PlayerSignalDispatcher>()),
+    );
 
-    let bitrate: u64 = stream.header("Icy-Br").unwrap().parse().unwrap();
+    // Tell the player what uri to play.
+    player.set_uri(Some(uri));
 
-    // buffer 2 seconds of audio
-    // bitrate (in kilobits) / bits per byte * bytes per kilobyte * 2 seconds
-    let prefetch_bytes = bitrate / 8 * 1024 * 2;
-
-    let reader = match StreamDownload::from_stream(
-        stream,
-        // use bounded storage to keep the underlying size from growing indefinitely
-        BoundedStorageProvider::new(
-            MemoryStorageProvider,
-            // be liberal with the buffer size, you need to make sure it holds enough space to
-            // prevent any out-of-bounds reads
-            NonZeroUsize::new(512 * 1024).unwrap(),
-        ),
-        Settings::default().prefetch_bytes(prefetch_bytes),
-    )
-    .await
-    {
-        Ok(reader) => reader,
-        Err(e) => panic!("{:?}", e.decode_error().await),
-    };
-
-    let handle = tokio::spawn(async move {
-        let (_stream, handle) = rodio::OutputStream::try_default().unwrap();
-        let sink = rodio::Sink::try_new(&handle).unwrap();
-        sink.append(rodio::Decoder::new(reader).unwrap());
-        loop {
-            sink.set_volume(*volume.read().unwrap());
-            if token.is_cancelled() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        sink.stop();
+    let error = Arc::new(Mutex::new(Ok((player.clone()))));
+    let token_clone = token.clone();
+    // Connect to the player's "end-of-stream" signal, which will tell us when the
+    // currently played media stream reached its end.
+    player.connect_end_of_stream(move |player| {
+        player.stop();
+        token_clone.cancel();
     });
 
-    handle.await.unwrap();
-    Ok(())
+    let error_clone = Arc::clone(&error);
+    let token_clone = token.clone();
+    // Connect to the player's "error" signal, which will inform us about eventual
+    // errors (such as failing to retrieve a http stream).
+    player.connect_error(move |player, err| {
+        let error = &error_clone;
+
+        *error.lock().unwrap() = Err(err.clone());
+
+        player.stop();
+        token_clone.cancel();
+    });
+
+    let guard = error.as_ref().lock().unwrap();
+
+    return guard.clone().map_err(|e| e.into());
+}
+
+pub fn play(uri: &str, volume: Arc<RwLock<f64>>, token: CancellationToken) {
+    if let Ok(player) = load(&uri, token.clone()) {
+        let player_clone = player.clone();
+        thread::spawn(move || {
+            loop {
+                player_clone.set_volume(*volume.read().unwrap());
+                if token.is_cancelled() {
+                    player_clone.stop();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        player.play();
+    }
 }
