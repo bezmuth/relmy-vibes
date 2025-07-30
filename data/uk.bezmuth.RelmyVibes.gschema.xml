@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="relmyvibes">
+	<schema id="uk.bezmuth.RelmyVibes" path="/uk/bezmuth/RelmyVibes/">
+	</schema>
+</schemalist>

@@ -1,0 +1,6 @@
+# List of source files containing translatable strings.
+# Please keep this file sorted alphabetically.
+data/uk.bezmuth.RelmyVibes.desktop.in
+data/uk.bezmuth.RelmyVibes.metainfo.xml.in
+data/uk.bezmuth.RelmyVibes.gschema.xml
+

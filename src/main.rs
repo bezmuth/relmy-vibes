@@ -606,6 +606,6 @@ impl AsyncComponent for Radio {
 
 fn main() {
     relm4_icons::initialize_icons(icon_names::GRESOURCE_BYTES, icon_names::RESOURCE_PREFIX);
-    let app = RelmApp::new("relm4.example.typed-list-view");
+    let app = RelmApp::new("uk.bezmuth.RelmyVibes");
     app.run_async::<Radio>(());
 }

@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=uk.bezmuth.RelmyVibes
+Exec=@bindir@/relmyvibes --gapplication-service

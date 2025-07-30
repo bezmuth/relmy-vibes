@@ -4,15 +4,8 @@ use std::fs::File;
 use std::io::prelude::*;
 
 fn get_data_dir() -> String {
-    format!(
-        "{}/.local/share/{}",
-        env::home_dir()
-            .unwrap()
-            .into_os_string()
-            .into_string()
-            .unwrap(),
-        env!("CARGO_CRATE_NAME")
-    )
+    env::var("XDG_DATA_HOME")
+        .unwrap_or_else(|_| format!("~/.local/share/{}", env!("CARGO_CRATE_NAME")))
 }
 
 pub fn save_stations(stations: Vec<crate::Station>) -> std::io::Result<()> {

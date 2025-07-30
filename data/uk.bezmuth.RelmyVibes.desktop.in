@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=RelmyVibes
+Exec=relmyvibes
+Icon=uk.bezmuth.RelmyVibes
+Terminal=false
+Type=Application
+Categories=Audio;
+Keywords=GTK;
+StartupNotify=true
