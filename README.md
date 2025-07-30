@@ -1,13 +1,10 @@
-# IcyVibes
-IcyVibes is a lighteweight internet radio player for Linux, written in rust using the [iced](https://iced.rs/) gui toolkit and the [rodio](https://github.com/RustAudio/rodio) audio playback library. Inspired by [goodvibes](https://gitlab.com/goodvibes/goodvibes).
+# RelmyVibes
+RelmyVibes is a lighteweight internet radio player for Linux, written in rust using the [relm4](https://relm4.org/) gui toolkit, [gstreamer-rs](https://github.com/sdroege/gstreamer-rs) and the [radio-browser](https://www.radio-browser.info/) API for station searching. Inspired by [goodvibes](https://gitlab.com/goodvibes/goodvibes).
 
 ## Screenshots
-### Onboarding
-![IcyVibes Onboarding](/repoassets/firststart.png?raw=true)
-### Adding a station
-![IcyVibes adding a station](/repoassets/addstation.png?raw=true)
-### Station list
-![IcyVibes station list](/repoassets/stationlist.png?raw=true)
-### Station editing
-![IcyVibes station list](/repoassets/stationedit.png?raw=true)
-# relmy-vibes
+### Main UI
+![RelmyVibes main UI](/repoassets/main.png?raw=true)
+### Station searching
+![RelmyVibes station search ui](/repoassets/search.png?raw=true)
+### Adding a station manually
+![RelmyVibes adding a station manually](/repoassets/add.png?raw=true)
